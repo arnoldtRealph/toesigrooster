@@ -69,8 +69,8 @@ st.markdown("""
             background-color: #F5F7FA;
             padding: 20px;
             border-radius: 10px;
-            max-width: 2000px !important;
-            min-width: 1600px !important;
+            max-width: 95vw !important;
+            width: 100%;
             margin: 0 auto;
         }
         .stButton>button {
@@ -104,8 +104,9 @@ st.markdown("""
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin-bottom: 20px;
-            max-width: 2000px !important;
-            min-width: 1600px !important;
+            max-width: 95vw !important;
+            width: 100%;
+       સ: 1600px;
         }
         .table-container {
             overflow-x: auto;
@@ -113,8 +114,8 @@ st.markdown("""
             width: 100%;
         }
         .wide-table {
-            min-width: 1800px !important;
-            max-width: 2200px !important;
+            width: 100%;
+            max-width: 1600px !important;
             margin: 0 auto;
             font-size: 20px;
             border-collapse: collapse;
@@ -127,8 +128,8 @@ st.markdown("""
             border: 1px solid #005B99;
         }
         .stSelectbox, .stMultiSelect {
-            width: 100% !important;
-            max-width: 400px !important;
+            width: 90% !important;
+            max-width: none !important;
         }
         .stColumn > div {
             display: flex;
@@ -285,7 +286,7 @@ for row_idx, teacher in enumerate(absent_educators, 1):
 
 # Substitution Schedule Table
 st.markdown("<div class='section'>", unsafe_allow_html=True)
-st.subheader("Vervangingskedule")
+st.subheader("TOESIGROOSTER")
 df_schedule = pd.DataFrame(table_data[1:], columns=unique_columns)
 df_schedule.index = df_schedule.index + 1  # Start index from 1
 st.markdown("<div class='table-container'><div class='wide-table'>", unsafe_allow_html=True)
@@ -331,7 +332,7 @@ st.markdown("</div>", unsafe_allow_html=True)
 # Generate the substitute schedule document
 st.markdown("<div class='section'>", unsafe_allow_html=True)
 st.markdown("<div class='generate-button'>", unsafe_allow_html=True)
-if st.button("Genereer Vervangingsdokument"):
+if st.button("Genereer TOESIGROOSTER"):
     current_date = datetime.now()
     for educator in absent_educators:
         if return_periods.get(educator, "Volle Dag Afwesig") != "Periode 1":
@@ -434,7 +435,7 @@ if st.button("Genereer Vervangingsdokument"):
     
     st.markdown("<div class='download-button'>", unsafe_allow_html=True)
     st.download_button(
-        label="Download Vervangingskedule",
+        label="Download TOESIGROOSTER",
         data=buffer,
         file_name="vervangingskedule.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
