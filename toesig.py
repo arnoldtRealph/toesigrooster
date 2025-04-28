@@ -7,49 +7,43 @@ from docx.enum.section import WD_ORIENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from io import BytesIO
-import base64
 from collections import defaultdict
 from datetime import datetime, timedelta
 import uuid
 import logging
 
-# Set wide layout for the entire app
+# Set wide layout
 st.set_page_config(layout="wide")
 
-# Set up logging for debugging
+# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Load the admin periods CSV file from the root folder
+# Load admin periods CSV
 df = pd.read_csv("admin periods.csv")
 
-# Convert CSV to dictionary format
+# Convert CSV to dictionary
 data = {}
 for day in df.columns[1:]:
     data[day] = {}
     for _, row in df.iterrows():
         period = row['Period']
         teachers = row[day]
-        # Clean and split teacher names, remove empty strings
         teacher_list = [t.strip() for t in teachers.split(',') if t.strip()]
         data[day][period] = teacher_list
 
-# Get all unique educators from CSV for dropdown menu
-all_educators = set()
-for day in data:
-    for period in data[day]:
-        all_educators.update(data[day][period])
-all_educators = sorted(list(all_educators))
+# Get unique educators
+all_educators = sorted(set(t for day in data for period in data[day] for t in data[day][period]))
 logger.debug(f"All educators: {all_educators}")
 
 # SMT teachers
 SMT_TEACHERS = [
     "AR VISAGIE", "C MATTHYS", "G ZEALAND", "J KLEIN",
     "Y COETZEE", "I DIEDERICKS", "R BRANDT", "E CLOETE", "J SAAL",
-    "ML MATTHYS", "M CLOETE", "P GELDERBLOEM", "D VAN EEDEN"
+    "ML MATTHYS", "M CLOETE", "P GELDERBLOM", "D VAN EEDEN"
 ]
 
-# Teachers to exclude from substitutions
+# Excluded teachers
 EXCLUDED_TEACHERS = []
 
 # Initialize session state
@@ -63,8 +57,14 @@ if "daily_substitutes" not in st.session_state:
     st.session_state.daily_substitutes = defaultdict(set)
 if "absence_timestamps" not in st.session_state:
     st.session_state.absence_timestamps = defaultdict(list)
+if "return_periods" not in st.session_state:
+    st.session_state.return_periods = {}
+if "leave_periods" not in st.session_state:
+    st.session_state.leave_periods = {}
+if "last_start_period" not in st.session_state:
+    st.session_state.last_start_period = None
 
-# Color scheme: Blues, whites, and green accents
+# CSS styling
 st.markdown("""
     <style>
         .main {
@@ -166,57 +166,101 @@ st.markdown("<div class='section'>", unsafe_allow_html=True)
 st.subheader("Afwesigheid en Skedule Konfigurasie")
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
-    absent_educators = st.multiselect("Kies Afwesige Opvoeders", all_educators, help="Kies opvoeders wat afwesig is.")
+    absent_educators = st.multiselect("Kies Afwesige Opvoeders", all_educators, key="absent_educators")
 with col2:
-    selected_day = st.selectbox("Kies Dag", list(data.keys()))
+    selected_day = st.selectbox("Kies Dag", list(data.keys()), key="selected_day")
 with col3:
-    day_layout = st.selectbox("Kies Dag Uitleg", ["2 Periodes Voor Eet/Break", "3 Periodes Voor Eet/Break"])
+    day_layout = st.selectbox("Kies Dag Uitleg", ["2 Periodes Voor Eet/Break", "3 Periodes Voor Eet/Break"], key="day_layout")
 with col4:
-    start_period = st.selectbox("Begin Periode", [f"Periode {i}" for i in range(1, 8)], index=0)
+    start_period = st.selectbox("Begin Periode", [f"Periode {i}" for i in range(1, 8)], key="start_period")
 with col5:
-    num_periods = st.number_input("Aantal Periodes", min_value=1, max_value=7, value=7, step=1)
+    num_periods = st.number_input("Aantal Periodes", min_value=1, max_value=7, value=7, key="num_periods")
 
-# Clear all inputs button
+# Clear inputs
 if st.button("Maak Alle Insette Skoon"):
     st.session_state.clear()
     st.rerun()
 
-# Define current_day
-current_day = selected_day
+# Check if start period changed and clear invalid periods
+start_period_idx = int(start_period.split()[-1])
+if st.session_state.last_start_period != start_period:
+    period_options = ["Volle Dag Afwesig"] + [f"Periode {i}" for i in range(1, 8)]
+    leave_period_options = ["Geen Vroeë Vertrek"] + [f"Periode {i}" for i in range(1, 8)]
+    
+    # Clear invalid return periods
+    for educator in list(st.session_state.return_periods.keys()):
+        if st.session_state.return_periods[educator] not in period_options:
+            logger.debug(f"Clearing invalid return period for {educator}: {st.session_state.return_periods[educator]}")
+            del st.session_state.return_periods[educator]
+    
+    # Clear invalid leave periods
+    for educator in list(st.session_state.leave_periods.keys()):
+        if st.session_state.leave_periods[educator] not in leave_period_options:
+            logger.debug(f"Clearing invalid leave period for {educator}: {st.session_state.leave_periods[educator]}")
+            del st.session_state.leave_periods[educator]
+    
+    st.session_state.last_start_period = start_period
 
-# Return periods for absent educators
-return_periods = {}
+# Specify return periods for absent teachers
+period_options = ["Volle Dag Afwesig"] + [f"Periode {i}" for i in range(1, 8)]
 if absent_educators:
-    st.subheader("Spesifiseer Terugkeer Periodes")
-    start_period_idx = int(start_period.split()[-1])
+    st.subheader("Spesifiseer Terugkeer Periodes vir Afwesige Opvoeders")
     for educator in absent_educators:
+        key = f"return_{educator}"
+        default_value = st.session_state.return_periods.get(educator, "Volle Dag Afwesig")
+        # Ensure default_value is in period_options
+        if default_value not in period_options:
+            default_value = "Volle Dag Afwesig"
+            logger.debug(f"Resetting return period for {educator} to 'Volle Dag Afwesig' as {default_value} is invalid")
         return_period = st.selectbox(
             f"Wanneer keer {educator} terug?",
-            ["Volle Dag Afwesig"] + [f"Periode {i}" for i in range(start_period_idx, 8)],
-            key=f"return_{educator}_{uuid.uuid4()}"
+            period_options,
+            index=period_options.index(default_value),
+            key=key
         )
-        return_periods[educator] = return_period
+        st.session_state.return_periods[educator] = return_period
+        logger.debug(f"Selected return period for {educator}: {return_period}")
+
+# Specify leave periods for non-absent teachers
+non_absent_educators = [t for t in all_educators if t not in absent_educators]
+if non_absent_educators:
+    st.subheader("Spesifiseer Vroeë Vertrek vir Ander Opvoeders")
+    leaving_educators = st.multiselect("Kies Opvoeders wat Vroeg Vertrek", non_absent_educators, key="leaving_educators")
+    if leaving_educators:
+        leave_period_options = ["Geen Vroeë Vertrek"] + [f"Periode {i}" for i in range(1, 8)]
+        for educator in leaving_educators:
+            key = f"leave_{educator}"
+            default_value = st.session_state.leave_periods.get(educator, "Geen Vroeë Vertrek")
+            # Ensure default_value is in leave_period_options
+            if default_value not in leave_period_options:
+                default_value = "Geen Vroeë Vertrek"
+                logger.debug(f"Resetting leave period for {educator} to 'Geen Vroeë Vertrek' as {default_value} is invalid")
+            leave_period = st.selectbox(
+                f"Wanneer vertrek {educator}?",
+                leave_period_options,
+                index=leave_period_options.index(default_value),
+                key=key
+            )
+            st.session_state.leave_periods[educator] = leave_period
+            logger.debug(f"Selected leave period for {educator}: {leave_period}")
+else:
+    st.session_state.leave_periods = {}
+
 st.markdown("</div>", unsafe_allow_html=True)
 
-# Generate dynamic schedule based on start period and number of periods
-start_period_idx = int(start_period.split()[-1])
-period_mapping = {f"Periode {i}": f"Period {i}" for i in range(1, 8)}
+# Generate schedule
 days = list(data.keys())
 current_day_idx = days.index(selected_day)
-next_day_idx = (current_day_idx + 1) % len(days)
-next_day = days[next_day_idx]
+next_day = days[(current_day_idx + 1) % len(days)]
 
-# Calculate teaching periods and full schedule
 teaching_periods = []
 full_schedule = []
 current_period_idx = start_period_idx
 periods_added = 0
-teaching_periods_count = 0  # Count teaching periods for break insertion
-teaching_periods_since_pouse1 = 0  # Count teaching periods since POUSE 1
+teaching_periods_count = 0
+teaching_periods_since_pouse1 = 0
 
-# Determine how many periods before "Eet" based on day_layout
 periods_before_eat = 2 if day_layout == "2 Periodes Voor Eet/Break" else 3
-# Determine how many periods between POUSE 1 and POUSE 2
 periods_before_pouse2 = 3 if day_layout == "2 Periodes Voor Eet/Break" else 2
 
 while periods_added < num_periods:
@@ -225,126 +269,126 @@ while periods_added < num_periods:
     if current_period_idx > 7:
         period_name += " (Dag 2)"
     teaching_periods.append(period_name)
-    
-    # Add the period to the full schedule
     full_schedule.append(period_name)
     teaching_periods_count += 1
     teaching_periods_since_pouse1 += 1
     periods_added += 1
     current_period_idx += 1
     
-    # Insert "Eet" and "POUSE 1" after the specified number of teaching periods
     if teaching_periods_count == periods_before_eat and periods_added < num_periods:
         full_schedule.extend(["Eet", "POUSE 1"])
         teaching_periods_since_pouse1 = 0
-    
-    # Insert "POUSE 2" after the specified number of teaching periods since POUSE 1
     if teaching_periods_since_pouse1 == periods_before_pouse2 and periods_added < num_periods:
         full_schedule.append("POUSE 2")
         teaching_periods_since_pouse1 = 0
 
-# Function to select substitute teacher
-def select_substitute(selected_day, period, absent_educators, used_teachers, start_period_idx):
+# Select substitute teacher
+def select_substitute(selected_day, period, absent_educators, used_teachers, start_period_idx, daily_used_teachers):
     try:
         period_num = int(period.split()[1].split(" ")[0])
-        # Determine if the period belongs to the next day
-        period_position = teaching_periods.index(period) + 1  # 1-based index in the schedule
+        period_position = teaching_periods.index(period) + 1
         total_periods_first_day = 7 - start_period_idx + 1
         day_to_use = selected_day if period_position <= total_periods_first_day else next_day
-        original_period = f"Period {period_num}"
-        scheduled_teachers = data.get(day_to_use, {}).get(original_period, [])
-        logger.debug(f"Day: {day_to_use}, Period: {period}, Original Period: {original_period}")
-        logger.debug(f"Scheduled teachers for {day_to_use}, {original_period}: {scheduled_teachers}")
-        logger.debug(f"Absent educators: {absent_educators}")
-        logger.debug(f"Excluded teachers: {EXCLUDED_TEACHERS}")
-        logger.debug(f"Used teachers for {period}: {used_teachers}")
-
-        # Filter available teachers
+        scheduled_teachers = data.get(day_to_use, {}).get(f"Period {period_num}", [])
+        
         available_teachers = [
             t for t in scheduled_teachers
             if t not in absent_educators and t not in EXCLUDED_TEACHERS and t not in used_teachers
         ]
-        logger.debug(f"Available teachers after filtering: {available_teachers}")
-
+        
         if not available_teachers:
-            logger.warning(f"No available teachers for {day_to_use}")
             return "OPDEEL"
         
-        # Prioritize non-SMT teachers, then SMT teachers
-        non_smt_teachers = [t for t in available_teachers if t not in SMT_TEACHERS]
-        smt_teachers = [t for t in available_teachers if t in SMT_TEACHERS]
+        # Prioritize teachers not used today
+        unused_teachers = [t for t in available_teachers if t not in daily_used_teachers]
+        non_smt_unused = [t for t in unused_teachers if t not in SMT_TEACHERS]
+        smt_unused = [t for t in unused_teachers if t in SMT_TEACHERS]
         
-        if non_smt_teachers:
-            substitute = non_smt_teachers[0]
-            logger.debug(f"Selected non-SMT substitute: {substitute}")
-        elif smt_teachers:
-            substitute = smt_teachers[0]
-            logger.debug(f"Selected SMT substitute: {substitute}")
+        if non_smt_unused:
+            substitute = non_smt_unused[0]
+        elif smt_unused and period not in [p for p in teaching_periods if smt_unused[0] in st.session_state.daily_substitutes[p]]:
+            substitute = smt_unused[0]
         else:
-            substitute = available_teachers[0]
-            logger.debug(f"Selected general substitute: {substitute}")
+            non_smt_used = [t for t in available_teachers if t not in SMT_TEACHERS]
+            smt_used = [t for t in available_teachers if t in SMT_TEACHERS and period not in [p for p in teaching_periods if t in st.session_state.daily_substitutes[p]]]
+            substitute = non_smt_used[0] if non_smt_used else smt_used[0] if smt_used else "OPDEEL"
         
         if substitute != "OPDEEL":
             used_teachers.add(substitute)
+            st.session_state.daily_substitutes[period].add(substitute)
             st.session_state.usage_counts[substitute] += 1
             st.session_state.usage_timestamps[substitute].append((datetime.now(), day_to_use))
-            logger.debug(f"Updated used_teachers for {period}: {used_teachers}")
         return substitute
-    except KeyError as e:
-        logger.error(f"KeyError in select_substitute: {str(e)}")
-        return "OPDEEL"
     except Exception as e:
         logger.error(f"Error in select_substitute: {str(e)}")
         return "OPDEEL"
 
-# Create unique column names
+# Generate substitution schedule
+st.session_state.daily_substitutes = defaultdict(set)
+daily_used_teachers = set()
 unique_columns = ["Afwesige Opvoeders"] + full_schedule
-
-# Generate substitution schedule once
-st.session_state.daily_substitutes = defaultdict(set)  # Reset substitutes
-num_rows = max(2, len(absent_educators) + 1)
-num_cols = len(unique_columns)
-table_data = [["" for _ in range(num_cols)] for _ in range(num_rows)]
+all_teachers = absent_educators + [t for t in st.session_state.leave_periods.keys() if st.session_state.leave_periods[t] != "Geen Vroeë Vertrek"]
+num_rows = max(2, len(all_teachers) + 1)
+table_data = [["" for _ in range(len(unique_columns))] for _ in range(num_rows)]
 table_data[0] = unique_columns
 
-if absent_educators:
-    for row_idx, teacher in enumerate(absent_educators, 1):
+if all_teachers:
+    for row_idx, teacher in enumerate(all_teachers, 1):
         table_data[row_idx][0] = teacher
 else:
     table_data[1][0] = "Geen"
 
 period_order = [p for p in full_schedule if p in teaching_periods]
-for row_idx, teacher in enumerate(absent_educators, 1):
-    return_period = return_periods.get(teacher, "Volle Dag Afwesig")
-    if return_period == "Volle Dag Afwesig":
-        periods_absent = period_order
-    else:
-        return_idx = int(return_period.split()[-1])
-        periods_absent = [p for p in period_order if int(p.split()[1].split(" ")[0]) < return_idx]
+for row_idx, teacher in enumerate(all_teachers, 1):
+    is_absent = teacher in absent_educators
+    return_period = st.session_state.return_periods.get(teacher, "Volle Dag Afwesig") if is_absent else None
+    leave_period = st.session_state.leave_periods.get(teacher, "Geen Vroeë Vertrek") if not is_absent else None
+    
+    return_idx = int(return_period.split()[-1]) if is_absent and return_period != "Volle Dag Afwesig" else 8
+    leave_idx = int(leave_period.split()[-1]) if not is_absent and leave_period != "Geen Vroeë Vertrek" else 8
     
     for col_idx, period in enumerate(full_schedule, 1):
         if period not in teaching_periods:
             table_data[row_idx][col_idx] = ""
-        elif period not in periods_absent:
-            table_data[row_idx][col_idx] = f"{teacher} (Terug)"
         else:
-            current_absent = [
-                t for t in absent_educators
-                if period in period_order and (
-                    return_periods.get(t, "Volle Dag Afwesig") == "Volle Dag Afwesig" or
-                    int(return_periods[t].split()[-1]) > int(period.split()[1].split(" ")[0])
-                )
-            ]
-            substitute = select_substitute(selected_day, period, current_absent, st.session_state.daily_substitutes[period], start_period_idx)
-            table_data[row_idx][col_idx] = substitute
+            # Extract the absolute period number
+            period_num = int(period.split()[1].split(" ")[0])
+            if is_absent:
+                if return_period != "Volle Dag Afwesig" and period_num >= return_idx:
+                    table_data[row_idx][col_idx] = "AANWESIG"
+                else:
+                    current_absent = [
+                        t for t in absent_educators
+                        if st.session_state.return_periods.get(t, "Volle Dag Afwesig") == "Volle Dag Afwesig" or
+                        (st.session_state.return_periods[t] != "Volle Dag Afwesig" and period_num < int(st.session_state.return_periods[t].split()[-1]))
+                    ]
+                    substitute = select_substitute(selected_day, period, current_absent, set(), start_period_idx, daily_used_teachers)
+                    table_data[row_idx][col_idx] = substitute
+                    if substitute != "OPDEEL":
+                        daily_used_teachers.add(substitute)
+            else:
+                if leave_period != "Geen Vroeë Vertrek" and period_num >= leave_idx:
+                    current_absent = [
+                        t for t in st.session_state.leave_periods.keys()
+                        if st.session_state.leave_periods[t] != "Geen Vroeë Vertrek" and period_num >= int(st.session_state.leave_periods[t].split()[-1])
+                    ] + [
+                        t for t in absent_educators
+                        if st.session_state.return_periods.get(t, "Volle Dag Afwesig") == "Volle Dag Afwesig" or
+                        (st.session_state.return_periods[t] != "Volle Dag Afwesig" and period_num < int(st.session_state.return_periods[t].split()[-1]))
+                    ]
+                    substitute = select_substitute(selected_day, period, current_absent, set(), start_period_idx, daily_used_teachers)
+                    table_data[row_idx][col_idx] = substitute
+                    if substitute != "OPDEEL":
+                        daily_used_teachers.add(substitute)
+                else:
+                    table_data[row_idx][col_idx] = "AANWESIG"
 
 # Substitution Schedule Table
 st.markdown("<div class='section'>", unsafe_allow_html=True)
 st.subheader("TOESIGROOSTER")
 df_schedule = pd.DataFrame(table_data[1:], columns=unique_columns)
-df_schedule.index = df_schedule.index + 1  # Start index from 1
+df_schedule.index = df_schedule.index + 1
 
-# Ensure columns are unique by appending a suffix if necessary
 unique_cols = []
 seen = {}
 for col in unique_columns:
@@ -356,7 +400,6 @@ for col in unique_columns:
         unique_cols.append(col)
 df_schedule.columns = unique_cols
 
-# Apply styling
 st.markdown("<div class='table-container'><div class='wide-table'>", unsafe_allow_html=True)
 st.table(df_schedule.style.set_properties(**{
     'background-color': '#E6F0FA',
@@ -383,13 +426,22 @@ for period in teaching_periods:
     period_num = int(period.split()[1].split(" ")[0])
     period_position = teaching_periods.index(period) + 1
     total_periods_first_day = 7 - start_period_idx + 1
-    day_to_use = current_day if period_position <= total_periods_first_day else next_day
-    available_data[period] = ", ".join([
+    day_to_use = selected_day if period_position <= total_periods_first_day else next_day
+    current_absent = [
+        t for t in absent_educators
+        if st.session_state.return_periods.get(t, "Volle Dag Afwesig") == "Volle Dag Afwesig" or
+        (st.session_state.return_periods[t] != "Volle Dag Afwesig" and period_num < int(st.session_state.return_periods[t].split()[-1]))
+    ] + [
+        t for t in st.session_state.leave_periods.keys()
+        if st.session_state.leave_periods[t] != "Geen Vroeë Vertrek" and period_num >= int(st.session_state.leave_periods[t].split()[-1])
+    ]
+    available_teachers = [
         t for t in data[day_to_use][f"Period {period_num}"]
-        if t not in absent_educators and t not in EXCLUDED_TEACHERS and t not in st.session_state.daily_substitutes[period]
-    ] or ["Geen"])
+        if t not in current_absent and t not in EXCLUDED_TEACHERS and t not in st.session_state.daily_substitutes[period]
+    ]
+    available_data[period] = ", ".join(available_teachers or ["Geen"])
 df_available = pd.DataFrame(list(available_data.items()), columns=["Periode", "Beskikbare Opvoeders"])
-df_available.index = df_available.index + 1  # Start index from 1
+df_available.index = df_available.index + 1
 st.table(df_available.style.set_properties(**{
     'background-color': '#E6F0FA',
     'color': '#003087',
@@ -403,13 +455,17 @@ st.table(df_available.style.set_properties(**{
 }]))
 st.markdown("</div>", unsafe_allow_html=True)
 
-# Generate the substitute schedule document
+# Generate document
 st.markdown("<div class='section'>", unsafe_allow_html=True)
 st.markdown("<div class='generate-button'>", unsafe_allow_html=True)
 if st.button("Genereer TOESIGROOSTER"):
     current_date = datetime.now()
     for educator in absent_educators:
-        if return_periods.get(educator, "Volle Dag Afwesig") != f"Periode {start_period_idx}":
+        if st.session_state.return_periods.get(educator, "Volle Dag Afwesig") != f"Periode {start_period_idx}":
+            st.session_state.absence_counts[educator] += 1
+            st.session_state.absence_timestamps[educator].append(current_date)
+    for educator in st.session_state.leave_periods:
+        if st.session_state.leave_periods[educator] != "Geen Vroeë Vertrek":
             st.session_state.absence_counts[educator] += 1
             st.session_state.absence_timestamps[educator].append(current_date)
     
@@ -423,7 +479,6 @@ if st.button("Genereer TOESIGROOSTER"):
     section.top_margin = Inches(0.5)
     section.bottom_margin = Inches(0.5)
     
-    # Header
     doc.add_heading("SAUL DAMON HIGH SCHOOL", 0).alignment = 1
     p = doc.add_paragraph()
     run = p.add_run(f"TOESIGROOSTER VIR {selected_day} ({datetime.now().strftime('%d/%m/%Y')})")
@@ -432,10 +487,8 @@ if st.button("Genereer TOESIGROOSTER"):
     p.alignment = 1
     doc.add_paragraph(f"Dag Uitleg: {day_layout} | Begin by: {start_period} | Aantal Periodes: {num_periods}").alignment = 1
     
-    # Substitution Table
-    num_rows = len(absent_educators) + 1 if absent_educators else 2
-    num_cols = len(unique_columns)
-    table = doc.add_table(rows=num_rows, cols=num_cols)
+    num_rows = len(all_teachers) + 1 if all_teachers else 2
+    table = doc.add_table(rows=num_rows, cols=len(unique_columns))
     table.style = 'Table Grid'
     table.autofit = False
     
@@ -453,7 +506,6 @@ if st.button("Genereer TOESIGROOSTER"):
     
     set_table_borders(table)
     
-    # Set header row
     hdr_cells = table.rows[0].cells
     for i, header in enumerate(unique_columns):
         hdr_cells[i].text = header
@@ -467,17 +519,15 @@ if st.button("Genereer TOESIGROOSTER"):
         cell_fill.set(qn('w:fill'), '005B99')
         hdr_cells[i]._element.get_or_add_tcPr().append(cell_fill)
     
-    # Calculate column width to fit page
     page_width = section.page_width - section.left_margin - section.right_margin
-    col_width = page_width / num_cols
+    col_width = page_width / len(unique_columns)
     for col in table.columns:
         for cell in col.cells:
             cell.width = col_width
     
-    # Populate data rows from table_data
-    if absent_educators:
-        for row_idx, teacher in enumerate(absent_educators, 1):
-            for col_idx in range(num_cols):
+    if all_teachers:
+        for row_idx, teacher in enumerate(all_teachers, 1):
+            for col_idx in range(len(unique_columns)):
                 cell = table.rows[row_idx].cells[col_idx]
                 cell.text = table_data[row_idx][col_idx]
                 if row_idx % 2 == 0:
@@ -494,16 +544,23 @@ if st.button("Genereer TOESIGROOSTER"):
                     run.font.size = Pt(8)
                     run.font.color.rgb = RGBColor(0, 48, 135)
     
-    # Available Teachers Section
     doc.add_heading("Beskikbare Opvoeders per Periode", level=2)
     for period in teaching_periods:
         period_num = int(period.split()[1].split(" ")[0])
         period_position = teaching_periods.index(period) + 1
         total_periods_first_day = 7 - start_period_idx + 1
-        day_to_use = current_day if period_position <= total_periods_first_day else next_day
+        day_to_use = selected_day if period_position <= total_periods_first_day else next_day
+        current_absent = [
+            t for t in absent_educators
+            if st.session_state.return_periods.get(t, "Volle Dag Afwesig") == "Volle Dag Afwesig" or
+            (st.session_state.return_periods[t] != "Volle Dag Afwesig" and period_num < int(st.session_state.return_periods[t].split()[-1]))
+        ] + [
+            t for t in st.session_state.leave_periods.keys()
+            if st.session_state.leave_periods[t] != "Geen Vroeë Vertrek" and period_num >= int(st.session_state.leave_periods[t].split()[-1])
+        ]
         available = [
             t for t in data[day_to_use][f"Period {period_num}"]
-            if t not in absent_educators and t not in EXCLUDED_TEACHERS and t not in st.session_state.daily_substitutes[period]
+            if t not in current_absent and t not in EXCLUDED_TEACHERS and t not in st.session_state.daily_substitutes[period]
         ]
         doc.add_paragraph(f"{period}: {', '.join(available) if available else 'Geen'}")
     
@@ -526,7 +583,6 @@ st.markdown("</div>", unsafe_allow_html=True)
 st.markdown("<div class='section'>", unsafe_allow_html=True)
 st.header("INSIGTE EN VISUALISERING")
 
-# Absence Frequency Graph
 st.subheader("OPVOEDER AFWESIGHEIDS FREKWENSIE (ALGEHEEL)")
 absence_data = pd.Series(st.session_state.absence_counts)
 if not absence_data.empty:
@@ -541,9 +597,8 @@ if not absence_data.empty:
 else:
     st.write("Geen afwesigheidsdata beskikbaar nie.")
 
-# Absenteeism Summary
 st.subheader("AFWESIGHEIDSOPSOMMING")
-summary_period = st.selectbox("Kies Opsommingsperiode", ["Weekliks", "Maandelikse", "Kwartaalliks"])
+summary_period = st.selectbox("Kies Opsommingsperiode", ["Weekliks", "Maandelikse", "Kwartaalliks"], key="summary_period")
 current_date = datetime.now()
 if summary_period == "Weekliks":
     start_date = current_date - timedelta(days=7)
@@ -575,7 +630,6 @@ if not period_absence_data.empty:
 else:
     st.write(f"Geen afwesigheidsdata vir die {period_label.lower()} beskikbaar nie.")
 
-# Substitute Usage Table
 st.markdown("<div class='section'>", unsafe_allow_html=True)
 st.subheader(f"Opvoeder Frekwensie ({period_label})")
 period_usage = defaultdict(int)
@@ -588,7 +642,7 @@ usage_data = pd.Series(period_usage)
 if not usage_data.empty:
     usage_df = pd.DataFrame(usage_data.items(), columns=["Opvoeder", "Aantal Vervangings"])
     usage_df = usage_df.sort_values(by="Aantal Vervangings", ascending=False).reset_index(drop=True)
-    usage_df.index = usage_df.index + 1  # Start index from 1
+    usage_df.index = usage_df.index + 1
     st.table(usage_df.style.set_properties(**{
         'background-color': '#E6F0FA',
         'color': '#003087',
